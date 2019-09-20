@@ -52,6 +52,7 @@ class RNNBase(torch.nn.Module):
 
         self._all_weight_names = []
         self._all_weight_values = []
+        orig_weight_values = []
         for layer in range(num_layers):
             for direction in range(num_directions):
                 layer_input_size = input_size if layer == 0 else hidden_size * num_directions
@@ -78,6 +79,7 @@ class RNNBase(torch.nn.Module):
                         packed_weight = torch.fbgemm_pack_gemm_matrix_fp16(
                             qweight)
 
+                        orig_weight_values.append(qweight)
                         params = [packed_weight, bias]
                         pos_names = ['packed', 'b']
                         ret_name = ['{}_{}_l{}{}'.format(name, ihhh, layer, suffix) for name in pos_names]
@@ -112,6 +114,14 @@ class RNNBase(torch.nn.Module):
                 for (ih, ih_name), (hh, hh_name) in zip(zip(ih_params, ih_param_names), zip(hh_params, hh_param_names)):
                     self._all_weight_names.extend([ih_name, hh_name])
                     self._all_weight_values.extend([ih, hh])
+
+        # For int8 quantization, _orig_weight_values is not needed in the quantization logic,
+        # however there is a JIT compilation error without it. This is just used to
+        # workaround that error.
+        if dtype == torch.qint8:
+            self._orig_weight_values = self._all_weight_values
+        else:
+            self._orig_weight_values = orig_weight_values
 
     def check_input(self, input, batch_sizes):
         # type: (Tensor, Optional[Tensor]) -> None
@@ -171,14 +181,22 @@ class RNNBase(torch.nn.Module):
             self.__overloads__,
             self.training,
             self.dtype,
+            self._orig_weight_values,
         )
 
-        dynamic_vals = torch.jit.annotate(List[Tuple[torch.Tensor, Optional[torch.Tensor]]],
-                                          [])
+        if self.dtype == torch.qint8:
+            dynamic_vals = torch.jit.annotate(List[Tuple[torch.Tensor, Optional[torch.Tensor]]],
+                                              [])
 
-        for i in range(len(self._all_weight_names)):
-            dynamic_vals.append(torch.ops.quantized.linear_unpack(self._all_weight_values[i]))
-        return vals, dynamic_vals
+            for i in range(len(self._all_weight_names)):
+                dynamic_vals.append(torch.ops.quantized.linear_unpack(self._all_weight_values[i]))
+
+            return vals, dynamic_vals
+        else:
+            dynamic_vals_fp16 = torch.jit.annotate(List[torch.Tensor], [])
+            for i in range(len(self._all_weight_names)):
+                dynamic_vals_fp16.append(self._all_weight_values[i])
+            return vals, dynamic_vals_fp16
 
     @torch.jit.export
     def __setstate__(self, state):
@@ -195,10 +213,15 @@ class RNNBase(torch.nn.Module):
         self.__overloads__ = vals[9]
         self.training = vals[10]
         self.dtype = vals[11]
+        self._orig_weight_values = vals[12]
 
         self._all_weight_values = []
-        for i in range(len(self._all_weight_names)):
-            self._all_weight_values.append(torch.ops.quantized.linear_prepack(*dynamic_vals[i]))
+        if self.dtype == torch.qint8:
+            for i in range(len(self._all_weight_names)):
+                self._all_weight_values.append(torch.ops.quantized.linear_prepack(*dynamic_vals[i]))
+        else:
+            for i in range(len(self._all_weight_names)):
+                self._all_weight_values.append(torch.torch.fbgemm_pack_gemm_matrix_fp16(*dynamic_vals[i]))
 
     @classmethod
     def from_float(cls, mod, dtype=torch.qint8):
@@ -236,6 +259,8 @@ class RNNBase(torch.nn.Module):
 
         qRNNBase._all_weight_names = []
         qRNNBase._all_weight_values = []
+        orig_weight_values = []
+        packed_weights = []
         for layer in range(qRNNBase.num_layers):
             for direction in range(num_directions):
                 layer_input_size = qRNNBase.input_size if layer == 0 else qRNNBase.hidden_size * num_directions
@@ -272,9 +297,11 @@ class RNNBase(torch.nn.Module):
                         packed_weight = torch.fbgemm_pack_gemm_matrix_fp16(
                             weight.float())
 
+                        orig_weight_values.append(weight)
                         params = [packed_weight, bias]
                         pos_names = ['packed', 'b']
                         ret_name = ['{}_{}_l{}{}'.format(name, ihhh, layer, suffix) for name in pos_names]
+                        packed_weights.append(ret_name[0])
                         return params, ret_name
 
                 suffix = '_reverse' if direction == 1 else ''
@@ -284,6 +311,14 @@ class RNNBase(torch.nn.Module):
                 for (ih, ih_name), (hh, hh_name) in zip(zip(ih_params, ih_param_names), zip(hh_params, hh_param_names)):
                     qRNNBase._all_weight_names.extend([ih_name, hh_name])
                     qRNNBase._all_weight_values.extend([ih, hh])
+
+        # For int8 quantization, _orig_weight_values is not needed in the quantization logic,
+        # however there is a JIT compilation error without it. This is just used to
+        # workaround that error.
+        if dtype == torch.qint8:
+            qRNNBase._orig_weight_values = qRNNBase._all_weight_values
+        else:
+            qRNNBase._orig_weight_values = orig_weight_values
 
         return qRNNBase
 
