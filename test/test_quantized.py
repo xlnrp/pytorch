@@ -737,6 +737,21 @@ class TestQuantizedOps(TestCase):
             cat_q = q_cat_op(tensors_q, dim=ch_axis, scale=scale,
                              zero_point=zero_point)
 
+    """Tests quantize concatenation (both fused and not)."""
+    @given(X=hu.tensor(shapes=hu.array_shapes(min_dims=3, max_dims=3,
+                                              min_side=1, max_side=2),
+                       qparams=hu.qparams()),
+           dim=st.integers(1, 2))
+    def test_mean(self, X, dim):
+        X, (scale, zero_point, torch_type) = X
+        qX = torch.quantize_per_tensor(torch.tensor(X).float(), scale, zero_point, torch_type)
+
+        Y = torch.mean(qX.dequantize(), dim)
+        Y = torch.quantize_per_tensor(Y, scale, zero_point, torch_type).dequantize()
+        qY = torch.mean(qX, dim)
+
+        self.assertEqual(Y, qY.dequantize())
+
     """Tests the correctness of the quantized equal op."""
     @unittest.skip("temporarily disable until failures are fixed. " +
                    "See https://github.com/pytorch/pytorch/issues/26279")
